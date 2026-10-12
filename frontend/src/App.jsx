@@ -11,12 +11,12 @@ import {
 } from "./services/api";
 
 const DEFAULT_SENSORS = {
-  tank_temperature: 25.4,
-  nutrient_ph: 6.2,
-  nutrient_ec: 1.8,
-  water_level: "FULL",
-  shed_temperature: 28.6,
-  humidity: 72,
+  tank_temperature: null,
+  nutrient_ph: null,
+  nutrient_ec: null,
+  water_level: null,
+  shed_temperature: null,
+  humidity: null,
 };
 
 const DEFAULT_AUTO = {
@@ -60,6 +60,10 @@ function readLocal(key, fallback) {
 }
 
 function number(value, decimals = 1) {
+  if (value === null || value === undefined || value === "") {
+    return "--";
+  }
+
   const n = Number(value);
   return Number.isFinite(n) ? n.toFixed(decimals) : "--";
 }
@@ -130,7 +134,7 @@ function App() {
     setControlOpen(true);
   }
 
-  // DEMO LOGIN ONLY — protect real APIs with backend authentication.
+  // Demo login only. This is not secure backend authentication.
   function handleLogin(event) {
     event.preventDefault();
 
@@ -139,10 +143,7 @@ function App() {
       return;
     }
 
-    if (
-      username.trim() !== "admin" ||
-      password !== "admin123"
-    ) {
+    if (username.trim() !== "admin" || password !== "admin123") {
       setLoginError("Invalid username or password.");
       return;
     }
@@ -162,35 +163,72 @@ function App() {
     navigate("Dashboard");
   }
 
+  // Fetch current sensor readings from the backend.
   async function refreshData() {
     try {
-      const [sensorResponse, nutrientResponse] = await Promise.all([
-        getSensors(),
-        getNutrients(),
-      ]);
+      const sensorResponse = await getSensors();
 
-      const sensorData = sensorResponse?.sensors ?? sensorResponse ?? {};
-      const nutrientData =
-        nutrientResponse?.nutrients ?? nutrientResponse ?? {};
+      const sensorData =
+        sensorResponse?.sensors ?? sensorResponse ?? {};
 
-      setSensors((old) => ({ ...old, ...sensorData }));
-      setNutrients((old) => ({ ...old, ...nutrientData }));
+      // Map the backend's generic temperature field to the shed display.
+      // Explicit hydroponics fields take priority when supplied.
+      const mappedSensors = {
+        ...sensorData,
+        shed_temperature:
+          sensorData.shed_temperature ?? sensorData.temperature,
+      };
+
+      setSensors((old) => ({
+        ...old,
+        ...mappedSensors,
+      }));
+
+      // Nutrient data is optional. A missing nutrient endpoint must
+      // not stop temperature and humidity from updating.
+      try {
+        const nutrientResponse = await getNutrients();
+
+        const nutrientData =
+          nutrientResponse?.nutrients ?? nutrientResponse ?? {};
+
+        setNutrients((old) => ({
+          ...old,
+          ...nutrientData,
+        }));
+      } catch (nutrientError) {
+        console.warn(
+          "Nutrient endpoint is unavailable:",
+          nutrientError.message
+        );
+      }
 
       const entry = {
         time: new Date().toLocaleString(),
-        ...{ ...DEFAULT_SENSORS, ...sensorData },
+        ...mappedSensors,
       };
 
       setHistory((old) => {
         const updated = [entry, ...old].slice(0, 100);
-        localStorage.setItem("hydro_history", JSON.stringify(updated));
+
+        try {
+          localStorage.setItem(
+            "hydro_history",
+            JSON.stringify(updated)
+          );
+        } catch {
+          console.warn("Could not save sensor history locally.");
+        }
+
         return updated;
       });
 
       setError("");
-    } catch {
+    } catch (err) {
       setError(
-        "Unable to reach the API. Check your Flask backend and API URL."
+        `Unable to load sensor data. Check the API URL and backend. ${
+          err.message || ""
+        }`
       );
     } finally {
       setLoading(false);
@@ -201,26 +239,38 @@ function App() {
     try {
       const response = await getAutomation();
       const settings = response?.settings ?? response ?? {};
-      setAutomation((old) => ({ ...old, ...settings }));
-    } catch {
-      // Keep current settings if the API is unavailable.
+
+      setAutomation((old) => ({
+        ...old,
+        ...settings,
+      }));
+    } catch (err) {
+      console.warn("Automation endpoint is unavailable:", err.message);
     }
   }
 
+  // Refresh sensors every 5 seconds while logged in.
   useEffect(() => {
     if (!isAuthenticated) return undefined;
 
     refreshData();
     refreshAutomation();
 
-    const timer = setInterval(refreshData, 5000);
+    const timer = setInterval(() => {
+      refreshData();
+    }, 5000);
+
     return () => clearInterval(timer);
   }, [isAuthenticated]);
 
   async function sendDose(letter) {
     const dose = Number(doses[letter]);
 
-    if (doses[letter].trim() === "" || !Number.isFinite(dose) || dose < 0) {
+    if (
+      doses[letter].trim() === "" ||
+      !Number.isFinite(dose) ||
+      dose < 0
+    ) {
       notify("Enter a valid non-negative dose.", true);
       return;
     }
@@ -229,10 +279,18 @@ function App() {
 
     try {
       await setNutrient(letter, dose);
-      setNutrients((old) => ({ ...old, [letter]: dose }));
+
+      setNutrients((old) => ({
+        ...old,
+        [letter]: dose,
+      }));
+
       notify(`Nutrient ${letter} dose saved: ${dose} ml/min.`);
-    } catch {
-      notify("Unable to save the nutrient dose. Check your API.", true);
+    } catch (err) {
+      notify(
+        `Unable to save nutrient dose. ${err.message || "Check your API."}`,
+        true
+      );
     } finally {
       setBusy("");
     }
@@ -252,12 +310,20 @@ function App() {
 
       setDevices((old) => ({
         ...old,
-        [device.id]: { state: next, mode: "MANUAL" },
+        [device.id]: {
+          state: next,
+          mode: "MANUAL",
+        },
       }));
 
       notify(`${device.name} command sent: ${next}.`);
-    } catch {
-      notify("Unable to send the device command. Check your API.", true);
+    } catch (err) {
+      notify(
+        `Unable to send device command. ${
+          err.message || "Check your API."
+        }`,
+        true
+      );
     } finally {
       setBusy("");
     }
@@ -297,8 +363,13 @@ function App() {
       }));
 
       notify("Automation settings saved.");
-    } catch {
-      notify("Unable to save automation settings.", true);
+    } catch (err) {
+      notify(
+        `Unable to save automation settings. ${
+          err.message || "Check your API."
+        }`,
+        true
+      );
     } finally {
       setBusy("");
     }
@@ -356,7 +427,7 @@ function App() {
       !Number.isFinite(actual) ||
       !Number.isFinite(target)
     ) {
-      notify("Enter a valid reference value.", true);
+      notify("Enter a valid sensor reading and reference value.", true);
       return;
     }
 
@@ -369,7 +440,10 @@ function App() {
     };
 
     setCalibrations(updated);
-    localStorage.setItem("hydro_calibrations", JSON.stringify(updated));
+    localStorage.setItem(
+      "hydro_calibrations",
+      JSON.stringify(updated)
+    );
 
     notify(
       "Display correction saved locally. Backend readings are unchanged."
@@ -378,7 +452,13 @@ function App() {
 
   function calibrated(sensorId) {
     const raw = Number(sensors[sensorId]);
+
+    if (sensors[sensorId] === null || sensors[sensorId] === undefined) {
+      return NaN;
+    }
+
     const offset = Number(calibrations[sensorId]?.offset || 0);
+
     return Number.isFinite(raw) ? raw + offset : NaN;
   }
 
@@ -409,7 +489,9 @@ function App() {
         </div>
 
         <button
-          className={`button ${isOn ? "button-stop" : "button-primary"} full-width`}
+          className={`button ${
+            isOn ? "button-stop" : "button-primary"
+          } full-width`}
           disabled={busy === device.id}
           onClick={() => toggleDevice(device)}
         >
@@ -424,7 +506,9 @@ function App() {
   function nutrientCard(letter) {
     return (
       <article className="nutrient-card" key={letter}>
-        <div className={`nutrient-letter nutrient-${letter}`}>{letter}</div>
+        <div className={`nutrient-letter nutrient-${letter}`}>
+          {letter}
+        </div>
 
         <div className="nutrient-info">
           <h3>Nutrient {letter}</h3>
@@ -459,7 +543,9 @@ function App() {
           disabled={busy === `nutrient-${letter}`}
           onClick={() => sendDose(letter)}
         >
-          {busy === `nutrient-${letter}` ? "Sending..." : "Save dose ↗"}
+          {busy === `nutrient-${letter}`
+            ? "Sending..."
+            : "Save dose ↗"}
         </button>
       </article>
     );
@@ -491,7 +577,8 @@ function App() {
   const pageInfo = {
     Dashboard: {
       title: "Dashboard",
-      subtitle: "Monitor your nutrient tank, sensors and growing environment.",
+      subtitle:
+        "Monitor your nutrient tank, sensors and growing environment.",
     },
     "Environment Control": {
       title: "Environment Control",
@@ -503,7 +590,8 @@ function App() {
     },
     Calibration: {
       title: "Sensor Calibration",
-      subtitle: "Compare sensor readings against trusted reference values.",
+      subtitle:
+        "Compare sensor readings against trusted reference values.",
     },
     History: {
       title: "Sensor History",
@@ -515,8 +603,6 @@ function App() {
     return (
       <div className="login-page">
         <form className="login-card" onSubmit={handleLogin}>
-          
-
           <div className="login-mark">H</div>
           <p className="eyebrow">SMART HYDROPONICS SYSTEM</p>
           <h1>Welcome back</h1>
@@ -555,11 +641,16 @@ function App() {
 
           {loginError && <p className="login-error">{loginError}</p>}
 
-          <button className="button button-primary full-width" type="submit">
+          <button
+            className="button button-primary full-width"
+            type="submit"
+          >
             Sign in →
           </button>
 
-          <p className="login-footer">HydroControl · Admin Portal</p>
+          <p className="login-footer">
+            HydroControl · Admin Portal
+          </p>
         </form>
       </div>
     );
@@ -570,7 +661,11 @@ function App() {
       <aside className="sidebar">
         <div className="brand">
           <label className="logo-box" title="Click to change first logo">
-            {logo ? <img src={logo} alt="HydroControl logo" /> : <span className="logo-fallback">H</span>}
+            {logo ? (
+              <img src={logo} alt="HydroControl logo" />
+            ) : (
+              <span className="logo-fallback">H</span>
+            )}
             <input
               type="file"
               accept="image/*"
@@ -618,10 +713,14 @@ function App() {
           </button>
 
           <button
-            className={`nav-item ${page.includes("Control") ? "active" : ""}`}
+            className={`nav-item ${
+              page.includes("Control") ? "active" : ""
+            }`}
             onClick={() => {
               setControlOpen((old) => !old);
-              if (!page.includes("Control")) navigate("Environment Control");
+              if (!page.includes("Control")) {
+                navigate("Environment Control");
+              }
             }}
           >
             <span>⌘</span>
@@ -632,7 +731,9 @@ function App() {
           {controlOpen && (
             <div className="subnav">
               <button
-                className={`subnav-item ${page === "Environment Control" ? "active" : ""}`}
+                className={`subnav-item ${
+                  page === "Environment Control" ? "active" : ""
+                }`}
                 onClick={() => navigate("Environment Control")}
               >
                 <span>◌</span>
@@ -640,7 +741,9 @@ function App() {
               </button>
 
               <button
-                className={`subnav-item ${page === "Tank Control" ? "active" : ""}`}
+                className={`subnav-item ${
+                  page === "Tank Control" ? "active" : ""
+                }`}
                 onClick={() => navigate("Tank Control")}
               >
                 <span>♧</span>
@@ -652,7 +755,9 @@ function App() {
           {NAV_ITEMS.slice(1).map((item) => (
             <button
               key={item.label}
-              className={`nav-item ${page === item.label ? "active" : ""}`}
+              className={`nav-item ${
+                page === item.label ? "active" : ""
+              }`}
               onClick={() => navigate(item.label)}
             >
               <span>{item.icon}</span>
@@ -681,7 +786,10 @@ function App() {
               <i />
               Monitoring
             </span>
-            <button className="button button-secondary" onClick={handleLogout}>
+            <button
+              className="button button-secondary"
+              onClick={handleLogout}
+            >
               Log out
             </button>
             <div className="avatar">HC</div>
@@ -698,7 +806,10 @@ function App() {
               <p>{pageInfo.subtitle}</p>
             </div>
 
-            <button className="button button-secondary" onClick={refreshData}>
+            <button
+              className="button button-secondary"
+              onClick={refreshData}
+            >
               ↻ Refresh
             </button>
           </div>
@@ -719,15 +830,23 @@ function App() {
           )}
 
           {loading && (
-            <div className="loading-note">Connecting to HydroControl API...</div>
+            <div className="loading-note">
+              Connecting to HydroControl API...
+            </div>
           )}
 
           {page === "Dashboard" && (
             <>
               <section className="welcome-banner">
                 <div className="welcome-copy">
-                  <span className="banner-kicker">SMART HYDROPONICS SYSTEM</span>
-                  <h2>Precision growing.<br />Simplified control.</h2>
+                  <span className="banner-kicker">
+                    SMART HYDROPONICS SYSTEM
+                  </span>
+                  <h2>
+                    Precision growing.
+                    <br />
+                    Simplified control.
+                  </h2>
                   <p>
                     Monitor reservoir conditions and manage your hydroponic
                     equipment from one workspace.
@@ -746,27 +865,46 @@ function App() {
                       <span className="eyebrow">RESERVOIR MONITOR</span>
                       <h2>Nutrient tank</h2>
                     </div>
-                    <span className="live-tag"><i />LIVE</span>
+                    <span className="live-tag">
+                      <i />
+                      LIVE
+                    </span>
                   </div>
 
                   <div className="tank-stage">
                     <div className="tank-side-note">
                       <small>TANK TEMP</small>
-                      <strong>{number(calibrated("tank_temperature"))}°C</strong>
+                      <strong>
+                        {number(calibrated("tank_temperature"))}°C
+                      </strong>
                     </div>
                     <div className="tank-drawing">
                       <TankIllustration waterLevel={sensors.water_level} />
                     </div>
                     <div className="tank-side-note">
                       <small>WATER LEVEL</small>
-                      <strong>{String(sensors.water_level || "UNKNOWN")}</strong>
+                      <strong>
+                        {String(sensors.water_level ?? "--")}
+                      </strong>
                     </div>
                   </div>
 
                   <div className="tank-bottom-stats">
-                    <div><span>pH level</span><strong>{number(calibrated("nutrient_ph"), 2)}</strong></div>
-                    <div><span>EC level</span><strong>{number(calibrated("nutrient_ec"), 2)} <small>mS/cm</small></strong></div>
-                    <div><span>Water status</span><strong>{String(sensors.water_level || "UNKNOWN")}</strong></div>
+                    <div>
+                      <span>pH level</span>
+                      <strong>{number(calibrated("nutrient_ph"), 2)}</strong>
+                    </div>
+                    <div>
+                      <span>EC level</span>
+                      <strong>
+                        {number(calibrated("nutrient_ec"), 2)}{" "}
+                        <small>mS/cm</small>
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Water status</span>
+                      <strong>{String(sensors.water_level ?? "--")}</strong>
+                    </div>
                   </div>
 
                   <button
@@ -783,13 +921,18 @@ function App() {
                       <span className="eyebrow">GROWING AREA MONITOR</span>
                       <h2>Shed environment</h2>
                     </div>
-                    <span className="live-tag"><i />LIVE</span>
+                    <span className="live-tag">
+                      <i />
+                      LIVE
+                    </span>
                   </div>
 
                   <div className="tank-stage">
                     <div className="tank-side-note">
                       <small>TEMPERATURE</small>
-                      <strong>{number(calibrated("shed_temperature"))}°C</strong>
+                      <strong>
+                        {number(calibrated("shed_temperature"))}°C
+                      </strong>
                     </div>
                     <div className="tank-drawing">
                       <ShedIllustration
@@ -804,9 +947,20 @@ function App() {
                   </div>
 
                   <div className="tank-bottom-stats">
-                    <div><span>Shed temperature</span><strong>{number(calibrated("shed_temperature"))}°C</strong></div>
-                    <div><span>Humidity</span><strong>{number(calibrated("humidity"), 0)}%</strong></div>
-                    <div><span>Monitoring</span><strong>LIVE</strong></div>
+                    <div>
+                      <span>Shed temperature</span>
+                      <strong>
+                        {number(calibrated("shed_temperature"))}°C
+                      </strong>
+                    </div>
+                    <div>
+                      <span>Humidity</span>
+                      <strong>{number(calibrated("humidity"), 0)}%</strong>
+                    </div>
+                    <div>
+                      <span>Monitoring</span>
+                      <strong>{error ? "OFFLINE" : "LIVE"}</strong>
+                    </div>
                   </div>
 
                   <div className="environment-tip">
@@ -833,12 +987,14 @@ function App() {
               <div className="section-heading">
                 <div>
                   <h2>Environment devices</h2>
-                  <p>Send manual commands through your Flask API.</p>
+                  <p>Send manual commands through your backend API.</p>
                 </div>
               </div>
 
               <div className="device-grid">
-                {DEVICES.filter((device) => device.group === "environment").map(deviceCard)}
+                {DEVICES.filter(
+                  (device) => device.group === "environment"
+                ).map(deviceCard)}
               </div>
 
               <section className="panel automation-panel">
@@ -871,13 +1027,26 @@ function App() {
                   <div className="threshold-group">
                     <h3>Fogger · Humidity</h3>
                     <div className="form-grid">
-                      {automationField("fogger_on", "Turn ON at or below", "%")}
-                      {automationField("fogger_off", "Turn OFF at or above", "%")}
+                      {automationField(
+                        "fogger_on",
+                        "Turn ON at or below",
+                        "%"
+                      )}
+                      {automationField(
+                        "fogger_off",
+                        "Turn OFF at or above",
+                        "%"
+                      )}
                     </div>
                   </div>
 
-                  <button className="button button-primary" disabled={busy === "automation"}>
-                    {busy === "automation" ? "Saving..." : "Save automation settings"}
+                  <button
+                    className="button button-primary"
+                    disabled={busy === "automation"}
+                  >
+                    {busy === "automation"
+                      ? "Saving..."
+                      : "Save automation settings"}
                   </button>
                 </form>
               </section>
@@ -894,7 +1063,9 @@ function App() {
               </div>
 
               <div className="device-grid">
-                {DEVICES.filter((device) => device.group === "tank").map(deviceCard)}
+                {DEVICES.filter(
+                  (device) => device.group === "tank"
+                ).map(deviceCard)}
               </div>
 
               <div className="section-heading nutrient-heading">
@@ -911,9 +1082,9 @@ function App() {
               <div className="info-banner">
                 <strong>Hardware connection</strong>
                 <p>
-                  The website sends commands to Flask. Your Raspberry Pi or
-                  controller must read those commands and operate the physical
-                  relays, pumps and dosing equipment.
+                  The website sends commands to the backend. Your Raspberry
+                  Pi or controller must receive those commands and operate
+                  the physical relays, pumps and dosing equipment.
                 </p>
               </div>
             </>
@@ -924,10 +1095,10 @@ function App() {
               <div className="info-banner">
                 <strong>Sensor calibration</strong>
                 <p>
-                  Select a sensor, enter a trusted reference reading and save
-                  its correction. Corrections are stored in this browser and
-                  adjust displayed values only. They do not calibrate the
-                  physical sensor or change backend readings.
+                  Select a sensor, enter a trusted reference reading and
+                  save its correction. Corrections are stored in this
+                  browser and adjust displayed values only. They do not
+                  calibrate the physical sensor or change backend readings.
                 </p>
               </div>
 
@@ -935,7 +1106,9 @@ function App() {
                 <section className="panel calibration-panel">
                   <span className="eyebrow">SENSOR CONFIGURATION</span>
                   <h2>Calibrate sensor</h2>
-                  <p className="panel-description">Compare the current reading with a known reference.</p>
+                  <p className="panel-description">
+                    Compare the current reading with a known reference.
+                  </p>
 
                   <form onSubmit={saveCalibration}>
                     <label className="form-field">
@@ -948,7 +1121,9 @@ function App() {
                         }}
                       >
                         {SENSORS.map((sensor) => (
-                          <option key={sensor.id} value={sensor.id}>{sensor.label}</option>
+                          <option key={sensor.id} value={sensor.id}>
+                            {sensor.label}
+                          </option>
                         ))}
                       </select>
                     </label>
@@ -957,7 +1132,13 @@ function App() {
                       <span>Current raw reading</span>
                       <strong>
                         {number(sensors[selectedSensor], 2)}{" "}
-                        <small>{SENSORS.find((sensor) => sensor.id === selectedSensor)?.unit}</small>
+                        <small>
+                          {
+                            SENSORS.find(
+                              (sensor) => sensor.id === selectedSensor
+                            )?.unit
+                          }
+                        </small>
                       </strong>
                     </div>
 
@@ -967,7 +1148,9 @@ function App() {
                         type="number"
                         step="any"
                         value={reference}
-                        onChange={(event) => setReference(event.target.value)}
+                        onChange={(event) =>
+                          setReference(event.target.value)
+                        }
                         placeholder="Enter reference reading"
                         required
                       />
@@ -993,9 +1176,14 @@ function App() {
                           <span>Adjusted display value</span>
                         </div>
                         <div className="calibration-values">
-                          <strong>{number(calibrated(sensor.id), 2)} <small>{sensor.unit}</small></strong>
+                          <strong>
+                            {number(calibrated(sensor.id), 2)}{" "}
+                            <small>{sensor.unit}</small>
+                          </strong>
                           <span>
-                            {saved ? `Offset ${Number(saved.offset).toFixed(2)}` : "Not calibrated"}
+                            {saved
+                              ? `Offset ${Number(saved.offset).toFixed(2)}`
+                              : "Not calibrated"}
                           </span>
                         </div>
                       </div>
@@ -1012,7 +1200,9 @@ function App() {
                 <div>
                   <span className="eyebrow">RECORDED READINGS</span>
                   <h2>Sensor history</h2>
-                  <p>Readings recorded by this browser during monitoring.</p>
+                  <p>
+                    Readings recorded by this browser during monitoring.
+                  </p>
                 </div>
                 <button
                   className="button button-secondary"
@@ -1041,7 +1231,11 @@ function App() {
                   </thead>
                   <tbody>
                     {history.length === 0 ? (
-                      <tr><td colSpan="7" className="empty-state">No readings recorded yet.</td></tr>
+                      <tr>
+                        <td colSpan="7" className="empty-state">
+                          No readings recorded yet.
+                        </td>
+                      </tr>
                     ) : (
                       history.map((row, index) => (
                         <tr key={`${row.time}-${index}`}>
@@ -1049,7 +1243,7 @@ function App() {
                           <td>{number(row.tank_temperature)}</td>
                           <td>{number(row.nutrient_ph, 2)}</td>
                           <td>{number(row.nutrient_ec, 2)}</td>
-                          <td>{row.water_level || "--"}</td>
+                          <td>{row.water_level ?? "--"}</td>
                           <td>{number(row.shed_temperature)}</td>
                           <td>{number(row.humidity, 0)}%</td>
                         </tr>
@@ -1065,7 +1259,11 @@ function App() {
             <span>HydroControl · Hydroponics monitoring</span>
             <span>
               <i />
-              {loading ? "Connecting" : error ? "Connection issue" : "Dashboard active"}
+              {loading
+                ? "Connecting"
+                : error
+                  ? "Connection issue"
+                  : "Dashboard active"}
             </span>
           </footer>
         </div>
@@ -1075,7 +1273,7 @@ function App() {
 }
 
 function TankIllustration({ waterLevel }) {
-  const level = String(waterLevel || "").toUpperCase();
+  const level = String(waterLevel ?? "").toUpperCase();
   const isFull = ["FULL", "HIGH"].includes(level);
   const isEmpty = ["EMPTY", "LOW", "CRITICAL"].includes(level);
   const waterY = isFull ? 100 : isEmpty ? 190 : 145;
@@ -1083,7 +1281,12 @@ function TankIllustration({ waterLevel }) {
   const waterLabel = level || "UNKNOWN";
 
   return (
-    <svg className="tank-svg" viewBox="0 0 300 280" role="img" aria-label={`Hydroponic nutrient tank, water level ${waterLabel}`}>
+    <svg
+      className="tank-svg"
+      viewBox="0 0 300 280"
+      role="img"
+      aria-label={`Hydroponic nutrient tank, water level ${waterLabel}`}
+    >
       <defs>
         <linearGradient id="tankBody" x1="0" x2="1">
           <stop offset="0%" stopColor="#e5f3e9" />
@@ -1124,14 +1327,27 @@ function ShedIllustration({ temperature, humidity }) {
 
   const tempColor = !Number.isFinite(temp)
     ? "#94a3b8"
-    : temp >= 35 ? "#ef4444" : temp >= 30 ? "#f59e0b" : "#23945c";
+    : temp >= 35
+      ? "#ef4444"
+      : temp >= 30
+        ? "#f59e0b"
+        : "#23945c";
 
   const humidityColor = !Number.isFinite(hum)
     ? "#94a3b8"
-    : hum >= 80 ? "#f59e0b" : hum < 40 ? "#ef4444" : "#23945c";
+    : hum >= 80
+      ? "#f59e0b"
+      : hum < 40
+        ? "#ef4444"
+        : "#23945c";
 
   return (
-    <svg className="tank-svg" viewBox="0 0 300 280" role="img" aria-label={`Shed temperature ${number(temperature)} degrees Celsius and humidity ${number(humidity, 0)} percent`}>
+    <svg
+      className="tank-svg"
+      viewBox="0 0 300 280"
+      role="img"
+      aria-label={`Shed temperature ${number(temperature)} degrees Celsius and humidity ${number(humidity, 0)} percent`}
+    >
       <defs>
         <linearGradient id="shedBody" x1="0" x2="1">
           <stop offset="0%" stopColor="#e5f3e9" />

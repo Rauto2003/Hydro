@@ -1,27 +1,32 @@
 
-const API_BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+const API_BASE = (
+  import.meta.env.VITE_API_URL || "http://127.0.0.1:8000"
+).replace(/\/+$/, "");
 
 async function request(path, options = {}) {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
-      "Content-Type": "application/json",
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
       ...options.headers,
     },
   });
 
   if (!response.ok) {
-    throw new Error(`API error: ${response.status}`);
+    const details = await response.text();
+    throw new Error(
+      `API ${options.method || "GET"} ${path} failed (${response.status}): ${details}`
+    );
   }
+
+  if (response.status === 204) return null;
 
   return response.json();
 }
 
-export const getSensors = () =>
-  request("/api/sensors");
+export const getSensors = () => request("/api/sensors");
 
-export const getNutrients = () =>
-  request("/api/nutrients");
+export const getNutrients = () => request("/api/nutrients");
 
 export const setNutrient = (name, value) =>
   request("/api/nutrients", {
@@ -35,8 +40,7 @@ export const controlActuator = (name, state) =>
     body: JSON.stringify({ name, state }),
   });
 
-export const getAutomation = () =>
-  request("/api/automation");
+export const getAutomation = () => request("/api/automation");
 
 export const saveAutomation = (settings) =>
   request("/api/automation", {
