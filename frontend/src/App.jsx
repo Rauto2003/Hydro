@@ -10,6 +10,8 @@ import {
   saveAutomation,
 } from "./services/api";
 
+const API_FALLBACK = "https://hydro-api-v30z.onrender.com";
+
 const DEFAULT_AUTO = {
   fan_on: 30,
   fan_off: 27,
@@ -39,37 +41,37 @@ const DEVICES = [
     id: "exhaust_fan",
     name: "Exhaust Fan",
     group: "environment",
-    description: "Removes hot air",
+    description: "Removes hot air from the growing area.",
   },
   {
     id: "cooling_pump",
     name: "Cooling Pump",
     group: "environment",
-    description: "Helps reduce temperature",
+    description: "Helps reduce growing-area temperature.",
   },
   {
     id: "fogger",
     name: "Fogger",
     group: "environment",
-    description: "Increases humidity",
+    description: "Increases humidity.",
   },
   {
     id: "inlet_pump",
     name: "Inlet Pump",
     group: "tank",
-    description: "Fills the nutrient tank",
+    description: "Fills the nutrient tank.",
   },
   {
     id: "outlet_pump",
     name: "Outlet Pump",
     group: "tank",
-    description: "Drains the nutrient tank",
+    description: "Drains the nutrient tank.",
   },
   {
     id: "reservoir_pump",
     name: "Reservoir Pump",
     group: "tank",
-    description: "Circulates nutrient solution",
+    description: "Circulates nutrient solution.",
   },
 ];
 
@@ -98,13 +100,38 @@ function average(shades, field) {
     )
     .map(Number);
 
-  if (values.length === 0) return null;
+  if (!values.length) return null;
 
-  return values.reduce((sum, value) => sum + value, 0) / values.length;
+  return values.reduce((sum, value) => sum + value, 0) /
+    values.length;
+}
+
+// Handles the common API response formats without losing readings.
+function extractSensorData(response) {
+  let data = response;
+
+  for (let i = 0; i < 3; i += 1) {
+    if (!data || typeof data !== "object") break;
+
+    if (data.received && typeof data.received === "object") {
+      data = data.received;
+      continue;
+    }
+
+    if (data.sensors && typeof data.sensors === "object") {
+      data = data.sensors;
+      continue;
+    }
+
+    break;
+  }
+
+  return data || {};
 }
 
 function App() {
   const [page, setPage] = useState("Dashboard");
+
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loggedIn, setLoggedIn] = useState(
@@ -114,16 +141,19 @@ function App() {
 
   const [shades, setShades] = useState(DEFAULT_SHADES);
   const [tank, setTank] = useState(DEFAULT_TANK);
+
   const [nutrients, setNutrients] = useState({
     A: 0,
     B: 0,
     C: 0,
   });
+
   const [doses, setDoses] = useState({
     A: "0",
     B: "0",
     C: "0",
   });
+
   const [automation, setAutomation] = useState(DEFAULT_AUTO);
 
   const [devices, setDevices] = useState(() =>
@@ -149,7 +179,10 @@ function App() {
   function login(event) {
     event.preventDefault();
 
-    if (username.trim() !== "admin" || password !== "admin123") {
+    if (
+      username.trim() !== "admin" ||
+      password !== "admin123"
+    ) {
       setLoginError("Invalid username or password.");
       return;
     }
@@ -157,6 +190,7 @@ function App() {
     sessionStorage.setItem("hydro_logged_in", "true");
     setLoggedIn(true);
     setLoginError("");
+    setPage("Dashboard");
   }
 
   function logout() {
@@ -165,21 +199,22 @@ function App() {
     setUsername("");
     setPassword("");
     setPage("Dashboard");
+    setMessage("");
+    setError("");
   }
 
+  // Fetch the latest sensor values from the deployed API.
   async function refreshData() {
     try {
       const response = await getSensors();
 
-      // Support the different response structures used by the API.
-      const data =
-        response?.received ??
-        response?.sensors?.received ??
-        response?.sensors ??
-        response ??
-        {};
+      console.log("HydroControl API response:", response);
 
-      // Only one growing shade is installed.
+      const data = extractSensorData(response);
+
+      console.log("HydroControl parsed sensor data:", data);
+
+      // Growing-area sensor readings.
       const shadeData = data.shades?.shade_1;
 
       if (shadeData && typeof shadeData === "object") {
@@ -191,46 +226,38 @@ function App() {
           },
         });
       } else {
-        // Also support flat sensor readings.
         const temperature =
           data.shed_temperature ?? data.temperature ?? null;
         const humidity = data.humidity ?? null;
         const lightIntensity = data.light_intensity ?? null;
 
-        if (
-          temperature !== null ||
-          humidity !== null ||
-          lightIntensity !== null
-        ) {
-          setShades({
-            shade_1: {
-              temperature,
-              humidity,
-              light_intensity: lightIntensity,
-            },
-          });
-        }
+        setShades({
+          shade_1: {
+            temperature,
+            humidity,
+            light_intensity: lightIntensity,
+          },
+        });
       }
 
-      // Read nutrient tank data.
-      const tankData =
-        data.nutrient_tank ??
-        response?.received?.nutrient_tank ??
-        {};
+      // Nutrient-tank readings.
+      const tankData = data.nutrient_tank;
 
-      if (Object.keys(tankData).length > 0) {
+      if (tankData && typeof tankData === "object") {
         setTank({
           tank_temperature: tankData.tank_temperature ?? null,
           nutrient_ph: tankData.nutrient_ph ?? null,
           nutrient_ec: tankData.nutrient_ec ?? null,
           water_level: tankData.water_level ?? null,
         });
+      } else {
+        setTank(DEFAULT_TANK);
       }
 
       setLastUpdated(new Date().toLocaleTimeString());
       setError("");
 
-      // Load nutrient dosing values independently.
+      // Load nutrient dosing settings separately.
       try {
         const nutrientResponse = await getNutrients();
         const nutrientData =
@@ -240,10 +267,20 @@ function App() {
           ...old,
           ...nutrientData,
         }));
+
+        setDoses((old) => ({
+          ...old,
+          ...Object.fromEntries(
+            ["A", "B", "C"]
+              .filter((key) => nutrientData[key] !== undefined)
+              .map((key) => [key, String(nutrientData[key])])
+          ),
+        }));
       } catch (err) {
         console.warn("Nutrient endpoint unavailable:", err.message);
       }
     } catch (err) {
+      console.error("Sensor refresh failed:", err);
       setError(
         `Unable to reach the API. Check your API URL and backend. ${
           err.message || ""
@@ -269,12 +306,17 @@ function App() {
   }
 
   useEffect(() => {
-    if (!loggedIn) return undefined;
+    if (!loggedIn) {
+      setLoading(false);
+      return undefined;
+    }
 
     refreshData();
     refreshAutomation();
 
-    const timer = setInterval(refreshData, 5000);
+    const timer = setInterval(() => {
+      refreshData();
+    }, 5000);
 
     return () => clearInterval(timer);
   }, [loggedIn]);
@@ -308,9 +350,9 @@ function App() {
     const dose = Number(doses[letter]);
 
     if (
+      doses[letter].trim() === "" ||
       !Number.isFinite(dose) ||
-      dose < 0 ||
-      doses[letter].trim() === ""
+      dose < 0
     ) {
       notify("Enter a valid non-negative dose.", true);
       return;
@@ -589,9 +631,7 @@ function App() {
           ].map((item) => (
             <button
               key={item}
-              className={`nav-item ${
-                page === item ? "active" : ""
-              }`}
+              className={`nav-item ${page === item ? "active" : ""}`}
               onClick={() => {
                 setPage(item);
                 setMessage("");
@@ -636,13 +676,9 @@ function App() {
         <div className="page-content">
           <div className="page-heading">
             <div>
-              <div className="eyebrow">
-                SMART HYDROPONICS SYSTEM
-              </div>
+              <div className="eyebrow">SMART HYDROPONICS SYSTEM</div>
               <h1>{page}</h1>
-              <p>
-                Live sensor data from your online Hydroponics API.
-              </p>
+              <p>Live sensor data from your online Hydroponics API.</p>
             </div>
 
             <button
@@ -729,17 +765,22 @@ function App() {
                       <span>Temperature</span>
                       <strong>{number(avgTemperature)} °C</strong>
                     </div>
-
                     <div>
                       <span>Humidity</span>
-                      <strong>{number(avgHumidity, 1)}%</strong>
+                      <strong>{number(avgHumidity)}%</strong>
                     </div>
-
                     <div>
                       <span>Monitoring</span>
                       <strong>{error ? "OFFLINE" : "LIVE"}</strong>
                     </div>
                   </div>
+
+                  <button
+                    className="button button-secondary"
+                    onClick={() => setPage("Environment Control")}
+                  >
+                    Control Environment
+                  </button>
                 </section>
               </div>
 
@@ -760,9 +801,7 @@ function App() {
                 <section className="panel tank-panel">
                   <div className="panel-heading">
                     <div>
-                      <span className="eyebrow">
-                        RESERVOIR MONITOR
-                      </span>
+                      <span className="eyebrow">RESERVOIR MONITOR</span>
                       <h2>Nutrient Solution</h2>
                     </div>
                   </div>
@@ -774,31 +813,32 @@ function App() {
                         {number(tank.tank_temperature)} °C
                       </strong>
                     </div>
-
                     <div>
                       <span>pH level</span>
                       <strong>{number(tank.nutrient_ph, 2)}</strong>
                     </div>
-
                     <div>
                       <span>EC level</span>
                       <strong>
                         {number(tank.nutrient_ec, 2)} mS/cm
                       </strong>
                     </div>
-
                     <div>
                       <span>Water level</span>
-                      <strong>
-                        {number(tank.water_level, 0)}%
-                      </strong>
+                      <strong>{number(tank.water_level, 0)}%</strong>
                     </div>
-
                     <div>
                       <span>Water status</span>
                       <strong>{waterLevelText}</strong>
                     </div>
                   </div>
+
+                  <button
+                    className="button button-secondary"
+                    onClick={() => setPage("Tank Control")}
+                  >
+                    Control Tank
+                  </button>
                 </section>
               </div>
 
@@ -857,9 +897,7 @@ function App() {
             <section className="panel automation-panel">
               <div className="panel-heading">
                 <div>
-                  <span className="eyebrow">
-                    AUTOMATION RULES
-                  </span>
+                  <span className="eyebrow">AUTOMATION RULES</span>
                   <h2>Automatic Thresholds</h2>
                 </div>
               </div>
