@@ -17,6 +17,7 @@ async function request(path, options = {}) {
 
   if (!response.ok) {
     const details = await response.text();
+
     throw new Error(
       `API ${options.method || "GET"} ${path} failed (${response.status}): ${details}`
     );
@@ -29,9 +30,11 @@ async function request(path, options = {}) {
   return response.json();
 }
 
-export const getSensors = () => request("/api/sensors");
+export const getSensors = () =>
+  request("/api/sensors");
 
-export const getNutrients = () => request("/api/nutrients");
+export const getNutrients = () =>
+  request("/api/nutrients");
 
 export const setNutrient = (name, value) =>
   request("/api/nutrients", {
@@ -45,7 +48,8 @@ export const controlActuator = (name, state) =>
     body: JSON.stringify({ name, state }),
   });
 
-export const getAutomation = () => request("/api/automation");
+export const getAutomation = () =>
+  request("/api/automation");
 
 export const saveAutomation = (settings) =>
   request("/api/automation", {
